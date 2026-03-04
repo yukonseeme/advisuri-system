@@ -3,6 +3,7 @@ from django.utils import timezone
 from rest_framework import generics, permissions, viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -11,6 +12,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from .models import TaskNote, Task, Message, Group, Document
 from .serializers import NoteSerializer, TaskSerializer, MessageSerializer, GroupSerializer, DocumentSerializer
 from .analytics.analytics_engine import AnalyticsEngine
+import pandas as pd
 
 User = get_user_model()
 
@@ -113,51 +115,88 @@ class DocumentDelete(generics.DestroyAPIView):
 # Handles the logic for all 10 features by calling the methods
 class GroupAnalyticsDashboard(APIView):
     def get(self, request, group_id):
-        # 1. Gather raw data
-        group = Group.objects.get(id=group_id)
-        tasks = Task.objects.filter(group=group)
-        messages = Message.objects.filter(group=group)
+        # 1. Gather raw data from Django ORM
+        try:
+            group = Group.objects.get(id=group_id)
+        except Group.DoesNotExist:
+            return Response({"error": "Group not found"}, status=404)
         
-        # 2. Initialize the Scikit-Learn Engine
-        engine = AnalyticsEngine(tasks, messages)
+        # Use .values() to get dictionary format for Pandas conversion
+        tasks_qs = Task.objects.filter(group_id=group_id).values()
+        messages_qs = Message.objects.filter(group_id=group_id).values()
+
+        # 2. Convert to DataFrames (The Engine Bridge)
+        tasks_df = pd.DataFrame(list(tasks_qs))
+        messages_df = pd.DataFrame(list(messages_qs))
         
-        # 3. Calculate all 9 features (Mapping to your specific list)
-        forecast_date, velocity = engine.get_completion_forecast(tasks.count())
+        # 3. Initialize the Engine with the data
+        engine = AnalyticsEngine(tasks_df, messages_df)
         
-        # Calculate Milestone Buffer (Days between deadline and forecast)
-        buffer_days = 0
-        if forecast_date and group.deadline:
-            buffer_days = (group.deadline - forecast_date.date()).days
+        # 4. Format inputs for the Engine
+        # Convert group deadline to string "YYYY-MM-DD"
+        deadline_str = group.deadline.strftime("%Y-%m-%d") if group.deadline else "2026-12-31"
+        # Use the currently logged-in user's ID
+        current_user_id = request.user.id
 
-        context = {
-            # Descriptive Features
-            "activity_pulse": engine.get_activity_pulse(),
-            "task_velocity": velocity,
-            "contribution_balance": engine.get_contribution_balance(),
-            
-            # Predictive Features (ML-based)
-            "at_risk_status": engine.predict_at_risk(
-                overdue_tasks=tasks.filter(due_date__lt=timezone.now(), status__ne='Completed').count(),
-                inactivity_days=5 # This would be calculated from last activity timestamp
-            ),
-            "tone_analysis": engine.analyze_tone(list(messages.values_list('content', flat=True))),
-            "workload_prediction": engine.predict_workload_burnout(tasks.count()),
-            
-            # Forecasting Features
-            "completion_forecast": forecast_date.strftime("%Y-%m-%d") if forecast_date else "N/A",
-            "milestone_buffer": buffer_days,
-            "member_bandwidth": self.get_member_bandwidth_report(group, engine)
-        }
+        # 5. Run the "Health Snapshot"
+        # This one call executes algorithms in analytics_engine.py and returns a combined report
+        analysis_results = engine.run_comprehensive_analysis(deadline_str, request.user.id)
+        # Add the member-specific report to the final response
+        analysis_results["member_report"] = self.get_member_bandwidth_report(
+            group, 
+            tasks_df, 
+            engine
+        )
+        # 6. Return the finalized Health Snapshot directly
+        return Response(analysis_results)
 
-        return Response(context)
-
-    def get_member_bandwidth_report(self, group, engine):
-        # Feature: Member Bandwidth (Calculated for each member in group)
+    def get_member_bandwidth_report(self, group, tasks_df, engine):
+        """
+        Calculates bandwidth for all members using the pre-loaded tasks DataFrame.
+        """
         report = []
+        if tasks_df.empty:
+            return report
+        
+        # Iterate through members of the group
         for member in group.members.all():
-            load = Task.objects.filter(assigned_to=member, status='In Progress').count()
+            # 1. Filter the existing DataFrame for this member's active tasks
+            # Matches your column 'assigned_to' and 'progress_percentage'
+            member_tasks = tasks_df[
+                (tasks_df['assigned_to'] == member.id) & 
+                (tasks_df['progress_percentage'] < 100)
+            ]
+            
+            load_count = len(member_tasks)
+
+            # 2. Get the AI prediction from the engine
+            # This uses your ML model logic internally
+            risk_score = engine.predict_member_bandwidth(member.id, load_count)
+            
             report.append({
                 "name": member.username,
-                "risk_score": engine.predict_member_bandwidth(member.id, load)
+                "active_tasks": load_count,
+                "risk_score": risk_score, # e.g., "High", "Low", or a 0-100 value
+                "status_color": "red" if load_count > 5 else "yellow" if load_count > 3 else "green"
             })
+            
         return report
+
+    def predict_member_bandwidth(self, member_id, load_count):
+        """
+        Goal: Determine if a specific user is overwhelmed.
+        Uses 'load_count' (tasks where progress < 100).
+        """
+        # If the user has zero tasks, they have 100% bandwidth
+        if load_count == 0:
+            return "Optimal"
+
+        # Threshold logic (You can later replace this with a ML model call)
+        if load_count >= 7:
+            return "Critical"
+        elif load_count >= 4:
+            return "High"
+        elif load_count >= 2:
+            return "Balanced"
+        else:
+            return "Low"

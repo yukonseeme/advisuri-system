@@ -16,7 +16,11 @@ from api.analytics.algorithms.member_bandwidth import calculate_detailed_bandwid
 from api.analytics.algorithms.risk_detection import predict_project_risk
 
 class AnalyticsEngine:
-    def __init__(self):
+    def __init__(self, tasks_df=None, messages_df=None):
+        # Store the dataframes passed from the View
+        self.tasks_df = tasks_df
+        self.messages_df = messages_df
+
         # Load DB_URI from environment
         password = os.getenv("DB_PWD")
         self.db_uri = f"postgresql://postgres.behbluflerhbslixhywa:{password}@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
@@ -41,56 +45,64 @@ class AnalyticsEngine:
             print(f"⚠️ Warning: AI Model could not be loaded. Risk detection will be 'Unknown'. Error: {e}")
         return None, None
 
-    def run_comprehensive_analysis(self, tasks_df, messages_df, deadline_str, user_id):
+    def run_comprehensive_analysis(self, deadline_str, user_id):
         """
         Executes all algorithms using synced DB column names.
         """
-        if tasks_df.empty:
+        if self.tasks_df is None or self.tasks_df.empty:
             return {"error": "No task data available"}
 
         # 1. Activity Pulse (Messages)
-        pulse_score = calculate_pulse(messages_df) # Inside, it uses messages_df['user_id']
+        pulse_score = calculate_pulse(self.messages_df) # Inside, it uses messages_df['user_id']
 
         # 2. Task Velocity
         # Note: Internally, task_velocity should now look for tasks_df['progress_percentage'] == 100
-        velocity_stats = calculate_velocity(tasks_df)
+        velocity_stats = calculate_velocity(self.tasks_df)
         velocity_value = velocity_stats.get('daily_velocity', 0)
 
         # 3. Completion Forecast
-        forecast_date = get_forecast_date(tasks_df, velocity_value)
+        forecast_date = get_forecast_date(self.tasks_df, velocity_value)
 
         # 4. At-Risk Detection (Using 1M Row Model)
         # Using the column 'is_overdue' which we added to your DB
-        overdue_count = len(tasks_df[tasks_df['is_overdue'] == True])
-        total_tasks = len(tasks_df)
+        overdue_count = len(self.tasks_df[self.tasks_df['is_overdue'] == True])
+        total_tasks = len(self.tasks_df)
         overdue_ratio = overdue_count / total_tasks if total_tasks > 0 else 0
         
-        ai_risk = "Unknown"
+        ai_risk = "Low"
         if self.model and self.scaler:
-            # Features: [Ratio, Inactivity(0), Total Tasks]
             X = self.scaler.transform([[overdue_ratio, 0, total_tasks]])
             pred = self.model.predict(X)[0]
             ai_risk = {0: "Low", 1: "Medium", 2: "High"}[pred]
 
         # 5. Contribution Balance (Using 'assignee_id')
-        balance = calculate_balance_score(tasks_df)
+        balance = calculate_balance_score(self.tasks_df)
 
         # 6. Workload & Bottlenecks
-        bottlenecks = analyze_workload_dynamics(tasks_df)
+        bottlenecks = analyze_workload_dynamics(self.tasks_df)
 
         # 7. Milestone Buffer (Compare forecast to your manual deadline)
         buffer_days = calculate_buffer(forecast_date, deadline_str)
 
         # 8. Member Bandwidth (Specific to logged-in user)
-        bandwidth = calculate_detailed_bandwidth(tasks_df, user_id)
-    
+        bandwidth = calculate_detailed_bandwidth(self.tasks_df, user_id)
+
         # 9. Burnout Detection
-        burnout_status = predict_project_risk(tasks_df, user_id)
+        # Calculate inactivity_days (days since last message activity)
+        inactivity_days = 0
+        if self.messages_df is not None and not self.messages_df.empty:
+            try:
+                latest_message = pd.to_datetime(self.messages_df['created_at']).max()
+                inactivity_days = (datetime.now() - latest_message).days
+            except:
+                inactivity_days = 0
+        
+        burnout_status = predict_project_risk(self.tasks_df, overdue_count, inactivity_days)
 
         # Combine into "Health Snapshot"
         # Using 'group_id' instead of 'project_id' to match your DB
         return {
-            "group_id": tasks_df['group_id'].iloc[0] if not tasks_df.empty else "N/A",
+            "group_id": self.tasks_df['group_id'].iloc[0] if not self.tasks_df.empty else "N/A",
             "metrics": {
                 "pulse": pulse_score,
                 "velocity": velocity_value,
