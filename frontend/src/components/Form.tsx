@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { Mail, Lock, Chrome } from 'lucide-react';
 import LoadingIndicator from './LoadingIndicator';
-import '../styles/form.css';
+import '../styles/Form.css';
 
 function Form() {
   const [email, setEmail] = useState<string>('');
