@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useSearchParams } from 'react-router-dom';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import DashboardPage from './pages/DashboardPage';
@@ -24,6 +24,23 @@ function RegisterAndLogout(): React.JSX.Element {
 }
 
 function App(): React.JSX.Element {
+  // Handle Supabase OAuth hash redirect
+  useEffect(() => {
+    const handleHash = () => {
+      const hash = window.location.hash;
+      if (hash && hash.includes('access_token')) {
+        // Supabase will automatically process the hash via onAuthStateChange
+        // Clear the hash after a short delay to clean up the URL
+        setTimeout(() => {
+          window.history.replaceState(null, '', window.location.pathname);
+        }, 100);
+        console.log('OAuth callback: Token received');
+      }
+    };
+    
+    handleHash();
+  }, []);
+  
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (event === 'SIGNED_IN' && session) {
