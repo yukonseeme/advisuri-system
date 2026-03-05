@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useSearchParams } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import DashboardPage from './pages/DashboardPage';
@@ -24,24 +24,36 @@ function RegisterAndLogout(): React.JSX.Element {
 }
 
 function App(): React.JSX.Element {
-  // Handle Supabase OAuth hash redirect
   useEffect(() => {
-    const handleHash = () => {
+    // Handle Supabase OAuth hash redirect on page load
+    // This processes the access_token from Google OAuth redirect
+    const handleOAuthHash = async () => {
       const hash = window.location.hash;
+      
       if (hash && hash.includes('access_token')) {
-        // Supabase will automatically process the hash via onAuthStateChange
-        // Clear the hash after a short delay to clean up the URL
-        setTimeout(() => {
-          window.history.replaceState(null, '', window.location.pathname);
-        }, 100);
-        console.log('OAuth callback: Token received');
+        console.log('OAuth callback detected, processing token...');
+        
+        // Clear the hash from URL after reading it
+        // Supabase SDK will pick up the token from the original hash
+        window.history.replaceState(null, '', window.location.pathname);
+        
+        // Force a session check to trigger onAuthStateChange
+        // This ensures the user gets properly logged in
+        const { data: { session }, error } = await supabase.auth.getSession();
+        
+        if (session) {
+          console.log('OAuth session established for:', session.user.email);
+        }
+        if (error) {
+          console.error('Error getting OAuth session:', error.message);
+        }
       }
     };
-    
-    handleHash();
-  }, []);
-  
-  useEffect(() => {
+
+    // Run on mount
+    handleOAuthHash();
+
+    // Set up auth state listener
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (event === 'SIGNED_IN' && session) {
         localStorage.setItem(ACCESS_TOKEN, session.access_token);
@@ -56,7 +68,6 @@ function App(): React.JSX.Element {
         if (!sessionStorage.getItem(loginKey)) {
           try {
             // Record the successful login in the Audit Logs
-            // Using the same structure as AdminPanel.tsx
             const { error: auditError } = await supabase.from('audit_logs').insert({
               user_id: userId,
               action: provider === 'google' ? 'User logged in via Google OAuth' : 'User logged in (Email/Password)',
